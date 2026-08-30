@@ -116,7 +116,7 @@ const S = {
   report: { warId: null, data: null, loading: false, err: null },
   myFaction: null,
   hits: { search: '', copiedAt: 0, side: {} },
-  ff: { status: null, statusErr: null, checking: false, registering: false, scouting: false, scoutProg: null, data: {}, err: null, sort: 'est', dir: 1, consent: store.rw_ff_consent === '1', autoTried: false, lastScoutAt: 0, match: { preset: 'all', min: '', max: '' }, myId: null, myName: null, myEst: null, popup: null },
+  ff: { status: null, statusErr: null, checking: false, registering: false, scouting: false, scoutProg: null, data: {}, err: null, sort: 'est', dir: 1, consent: store.rw_ff_consent === '1', autoTried: false, lastScoutAt: 0, match: { preset: 'all', min: '', max: '' }, myId: null, myName: null, myEst: null, popup: null, squadSearch: '' },
   err: null,
   nextAt: 0,
   busy: false,
@@ -1231,12 +1231,17 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
   if (!ownFac) {
     return `<div class="panel pad muted tiny" style="margin-bottom:14px">Squad matchups need your faction — detected: <b>none</b>. It is auto-detected from your key, or pin a faction id in SETUP &amp; ABOUT.</div>`;
   }
-  const rows = (ownRoster || []).slice();
   const listedSet = new Set(hitsGet(war.id).map((x) => x.id));
   const dir = S.ff.dir;
+  const q = (S.ff.squadSearch || '').toLowerCase().trim();
+  const allRows = (ownRoster || []).slice();
+  const rows = q
+    ? allRows.filter((m) => m.name.toLowerCase().includes(q) || String(m.id).includes(q))
+    : allRows;
   const enriched = rows.map((m) => ({ m, rec: ffDataFor(m.id), est: ffEst(ffDataFor(m.id)) }));
   enriched.sort((a, b) => dir * ((a.est == null ? Infinity : a.est) - (b.est == null ? Infinity : b.est)));
   const scoutedOwn = enriched.filter((x) => x.rec).length;
+  const totalOwn = allRows.length;
   const trs = enriched.map(({ m, rec, est }) => {
     const si = statusInfo(m);
     const band = ffBand(rec);
@@ -1256,10 +1261,13 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
     <div class="pad" style="padding-bottom:8px">
       <div class="row wrap" style="gap:8px">
         <span class="muted tiny" style="letter-spacing:.14em;font-weight:800">YOUR SQUAD — ${esc(ownFac.name)} · CLICK A MEMBER FOR FF SCOUTER CARD + WHO THEY SHOULD HIT</span>
+        <input type="text" id="squad-search" placeholder="Search member (name or id)…" value="${esc(S.ff.squadSearch || '')}" spellcheck="false" style="width:200px;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:6px 10px;font-size:12.5px;outline:none">
+        ${q ? `<button class="btn small icon del" data-action="clear-squad-search" title="Clear search">✕</button>` : ''}
         <span class="spacer"></span>
-        <span class="muted tiny">${scoutedOwn}/${rows.length} scouted · range preset follows the selector above</span>
+        <span class="muted tiny">${q ? enriched.length + ' of ' + totalOwn + ' shown · ' : ''}${scoutedOwn}/${totalOwn} scouted · range preset follows the selector above</span>
       </div>
-      ${!rows.length ? '<div class="tiny muted blink" style="margin-top:6px">waiting for your faction roster…</div>' : ''}
+      ${!totalOwn ? '<div class="tiny muted blink" style="margin-top:6px">waiting for your faction roster…</div>'
+        : !rows.length ? `<div class="tiny muted" style="margin-top:6px">no members match &quot;${esc(q)}&quot;</div>` : ''}
     </div>
     ${rows.length ? `
     <div class="tblscroll" style="max-height:330px"><table class="tbl">
@@ -1875,6 +1883,7 @@ document.addEventListener('click', (e) => {
     if (war) hitsSet(war.id, []);
     renderView();
   }
+  else if (act === 'clear-squad-search') { S.ff.squadSearch = ''; renderView(); }
   else if (act === 'open-member') { S.ff.popup = +el.dataset.pid; renderView(); }
   else if (act === 'close-member') { if (el === e.target) { S.ff.popup = null; renderView(); } }
   else if (act === 'goto-my-war') {
@@ -1932,6 +1941,7 @@ document.addEventListener('input', (e) => {
   if (t.id === 'wars-search') { S.warsSearch = t.value; renderView(); }
   else if (t.id === 'room-search') { S.room.search = t.value; renderView(); }
   else if (t.id === 'hits-search') { S.hits.search = t.value; renderView(); }
+  else if (t.id === 'squad-search') { S.ff.squadSearch = t.value; renderView(); }
   else if (t.id === 'ff-min' || t.id === 'ff-max') {
     S.ff.match[t.id === 'ff-min' ? 'min' : 'max'] = t.value;
     if (S.ff.match.preset !== 'custom') S.ff.match.preset = 'custom';
