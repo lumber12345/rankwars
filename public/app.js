@@ -105,6 +105,9 @@ const S = {
   interval: parseInt(store.rw_interval || '15', 10),
   tab: 'wars',
   chains: {},
+  warkills: {},
+  warkillsErr: null,
+  wkBusy: false,
   pin: store.rw_pin || '',
   pinAuto: false,
   pinAutoTried: false,
@@ -117,7 +120,8 @@ const S = {
   report: { warId: null, data: null, loading: false, err: null },
   myFaction: null,
   hits: { search: '', copiedAt: 0, side: {} },
-  ff: { status: null, statusErr: null, checking: false, registering: false, scouting: false, scoutProg: null, data: {}, err: null, sort: 'est', dir: 1, consent: store.rw_ff_consent === '1', autoTried: false, lastScoutAt: 0, match: { preset: 'all', min: '', max: '' }, myId: null, myName: null, myEst: null, popup: null, squadSearch: '', discCopiedAt: 0 },
+  wrep: { faction: store.rw_wrepfaction || '', rows: null, warId: null, data: null, loading: false, loadingWar: false, err: null, sort: 'kills' },
+  ff: { status: null, statusErr: null, checking: false, registering: false, scouting: false, scoutProg: null, data: {}, err: null, sort: 'est', dir: 1, consent: store.rw_ff_consent === '1', autoTried: false, lastScoutAt: 0, match: { preset: 'all', min: '', max: '' }, myId: null, myName: null, myEst: null, popup: null, squadSearch: '', discCopiedAt: 0, myEstTriedAt: 0, myNoEst: false },
   err: null,
   nextAt: 0,
   busy: false,
@@ -928,8 +932,8 @@ function ffDataFor(id) { // memory first (freshest), then localStorage within TT
   if (c && Date.now() - c.at < FF_TTL) return c;
   return null;
 }
-function ffEst(rec) { return rec && rec.d && Number.isFinite(+rec.d.bs_estimate) ? +rec.d.bs_estimate : null; }
-function ffFf(rec) { return rec && rec.d && Number.isFinite(+rec.d.fair_fight) ? +rec.d.fair_fight : null; }
+function ffEst(rec) { const v = rec && rec.d ? rec.d.bs_estimate : null; return v != null && Number.isFinite(+v) && +v > 0 ? +v : null; }
+function ffFf(rec) { const v = rec && rec.d ? rec.d.fair_fight : null; return v != null && Number.isFinite(+v) && +v >= 1 ? +v : null; }
 function ffScalePct(est) { // log scale 1k → 1t
   if (!est) return 0;
   const l = Math.log10(est);
@@ -1003,6 +1007,7 @@ async function scoutFaction(force = false) {
   const all = (S.room.rosterA || []).concat(S.room.rosterB || []);
   if (!all.length) { renderView(); return; } // rosters not in yet — next poll will retry
   const ids = all.map((m) => m.id);
+  if (S.ff.myId && !ids.includes(S.ff.myId)) ids.push(S.ff.myId); // scout ourselves too → powers "my est" anchor
   const need = force ? ids : ids.filter((id) => !ffDataFor(id));
   if (!need.length) { S.ff.lastScoutAt = Date.now(); renderView(); return; }
   if (S.ff.scouting) return;
@@ -1022,6 +1027,10 @@ async function scoutFaction(force = false) {
         }
       });
       S.ff.scoutProg.done += chunk.length;
+      if (S.ff.myId && S.ff.myEst == null && S.ff.data[S.ff.myId]) {
+        S.ff.myEst = ffEst(S.ff.data[S.ff.myId]);
+        if (S.ff.myEst == null) S.ff.myNoEst = true;
+      }
       if (i + 200 < need.length) await new Promise((r) => setTimeout(r, 3500)); // stay under 20 req/min
     }
     S.ff.lastScoutAt = Date.now();
@@ -1042,6 +1051,73 @@ function ffRangeSummary(roster) {
 function warSelectOptions() {
   return S.wars.filter((w) => warPhase(w) !== 'done')
     .map((w) => `<option value="${w.id}" ${w.id === S.room.warId ? 'selected' : ''}>${w.own ? '★ ' : ''}#${w.id} — ${esc(w.factions[0].name)} vs ${esc(w.factions[1].name)}${w.own ? ' (your war)' : ''}</option>`).join('');
+}
+
+/* ----- per-member war kill tally (faction attacks feed, Limited key) ----- */
+const WK_PAGES_PER_CYCLE = 6;
+const WK_WIN_RESULTS = ['Attacked', 'Mugged', 'Hospitalized', 'Arrested', 'Looted', 'Bounty', 'Special'];
+function wkKey(warId, facId) { return 'rw_wk_' + warId + '_' + facId; }
+function wkLoad(facId, warId) {
+  try {
+    const v = JSON.parse(store.getItem(wkKey(warId, facId)) || 'null');
+    return v && v.counts ? v : { counts: {}, lastTs: 0, done: false };
+  } catch (e) { return { counts: {}, lastTs: 0, done: false }; }
+}
+function wkSave(facId, warId, st) { try { store.setItem(wkKey(warId, facId), JSON.stringify(st)); } catch (e) {} }
+function wkState(war, facId) {
+  const key = war.id + '_' + facId;
+  if (!S.warkills[key]) S.warkills[key] = wkLoad(facId, war.id);
+  return S.warkills[key];
+}
+async function loadWarKills(war, facId, enemyIds) {
+  if (!facId || !enemyIds || !enemyIds.size) return;
+  const st = wkState(war, facId);
+  const warOngoing = warPhase(war) !== 'done';
+  if (warOngoing && st.lastTry && Date.now() - st.lastTry < 30000) return; // throttle catch-up polling
+  if (S.demo) {
+    if (!st.done) {
+      const side = war.factions.findIndex((f) => +f.id === +facId);
+      const roster = side === 0 ? S.room.rosterA : S.room.rosterB;
+      (roster || []).forEach((m) => { st.counts[m.id] = 3 + (m.id % 41); });
+      st.done = true;
+      wkSave(facId, war.id, st);
+    }
+    return;
+  }
+  if (st.done || S.wkBusy) return;
+  S.wkBusy = true;
+  try {
+    let from = st.lastTs ? st.lastTs + 1 : (+war.start || 0);
+    for (let page = 0; page < WK_PAGES_PER_CYCLE; page++) {
+      const d = await torn(`/faction/${facId}/attacks`, { filters: 'outgoing', from, sort: 'ASC', limit: 100 });
+      const arr = (d && d.attacks) || [];
+      arr.forEach((a) => {
+        if (a && a.is_ranked_war && a.defender && enemyIds.has(+a.defender.id) && WK_WIN_RESULTS.includes(a.result)) {
+          const atk = a.attacker && +a.attacker.id;
+          if (atk) st.counts[atk] = (st.counts[atk] || 0) + 1;
+        }
+      });
+      const last = arr[arr.length - 1];
+      if (!last || arr.length < 100) {
+        // caught up with the feed — for ongoing wars keep polling (throttled) so new kills count
+        st.done = !warOngoing;
+        st.lastTry = Date.now();
+        break;
+      }
+      st.lastTs = +last.started || 0;
+      from = st.lastTs + 1;
+      wkSave(facId, war.id, st);
+      if (from > Date.now() / 1000 + 5) { st.done = !warOngoing; st.lastTry = Date.now(); break; }
+    }
+    wkSave(facId, war.id, st);
+    S.warkillsErr = null;
+  } catch (e) {
+    const code = e && e.error && e.error.code;
+    const msg = String((e && e.error && e.error.error) || '');
+    if (code === 7 || /incorrect permission|access.*limited|limited.*required/i.test(msg)) S.warkillsErr = 'limited';
+    /* else: transient — retried on the next refresh cycle */
+  }
+  S.wkBusy = false;
 }
 
 /* ----- faction chain meters (GET /faction/{id}/chain, public) ----- */
@@ -1186,34 +1262,51 @@ function ffRangeLabel(b) {
   return [lo, hi].filter(Boolean).join(' & ');
 }
 async function ensureMyIdentity() {
-  if (S.ff.myId || S.ff.myLoading) return;
-  S.ff.myLoading = true;
-  try {
-    if (S.demo) {
+  if (S.demo) {
+    if (!S.ff.myId) {
       S.ff.myId = Demo.myId();
       S.ff.myName = 'you (demo)';
-    } else if (S.key) {
+      S.ff.myEst = ffEst(ffDataFor(S.ff.myId));
+      if (S.tab === 'hits') renderView();
+    }
+    return;
+  }
+  if (!S.key) return;
+  // identity (once)
+  if (!S.ff.myId && !S.ff.myIdLoading) {
+    S.ff.myIdLoading = true;
+    try {
       const d = await torn('/user/basic');
       const prof = (d && (d.profile || d.basic)) || d || {};
       if (prof.id || prof.player_id) {
         S.ff.myId = +(prof.id || prof.player_id);
         S.ff.myName = prof.name || null;
       }
-    }
-  } catch (e) { /* identity anchor is optional — presets fall back to FF bands */ }
-  if (S.ff.myId && !ffDataFor(S.ff.myId)) {
-    try {
-      const arr = await ffApi('stats', { ids: String(S.ff.myId) });
-      const d = Array.isArray(arr) ? arr[0] : null;
-      if (d && d.player_id) {
-        const rec = { at: Date.now(), d };
-        S.ff.data[d.player_id] = rec;
-        ffCacheSet(d.player_id, d);
-        S.ff.myEst = ffEst(rec);
-      }
-    } catch (e) { /* keep going without personal anchor */ }
+    } catch (e) { /* identity anchor is optional */ }
+    S.ff.myIdLoading = false;
   }
-  S.ff.myLoading = false;
+  if (!S.ff.myId) return;
+  // own estimate: cached from scouting, else retry (throttled) — e.g. first try raced key registration
+  if (S.ff.myEst == null && !S.ff.myNoEst) {
+    const rec = ffDataFor(S.ff.myId);
+    if (rec) {
+      S.ff.myEst = ffEst(rec);
+      if (S.ff.myEst == null) S.ff.myNoEst = true; // FF simply has no estimate for us
+    } else if (Date.now() - S.ff.myEstTriedAt > 60000) {
+      S.ff.myEstTriedAt = Date.now();
+      try {
+        const arr = await ffApi('stats', { ids: String(S.ff.myId) });
+        const d = Array.isArray(arr) ? arr[0] : null;
+        if (d && d.player_id) {
+          const r = { at: Date.now(), d };
+          S.ff.data[d.player_id] = r;
+          ffCacheSet(d.player_id, d);
+          S.ff.myEst = ffEst(r);
+          if (S.ff.myEst == null) S.ff.myNoEst = true;
+        }
+      } catch (e) { /* retried on the next refresh cycle */ }
+    }
+  }
   if (S.tab === 'hits') renderView();
 }
 
@@ -1235,7 +1328,16 @@ function ffPanel(war, roster, enemy) {
   };
   rows.sort(sorters[S.ff.sort] || sorters.est);
 
-  const bounds = ffMatchBounds();
+  let bounds = ffMatchBounds();
+  let ffFallbackAll = false;
+  if (bounds.mode === 'ff' && rows.length) {
+    const ffKnown = rows.filter((r) => ffFf(r.rec) != null).length;
+    if (!ffKnown) {
+      // no member has a personalized FF value — filtering would hide everyone; show all + explain
+      ffFallbackAll = true;
+      bounds = { mode: 'est', min: null, max: null, anchor: 'all' };
+    }
+  }
   const matched = rows.filter((r) => ffInRange(r.rec, bounds));
 
   const trs = matched.map(({ m, rec }) => {
@@ -1304,11 +1406,13 @@ function ffPanel(war, roster, enemy) {
       <span class="muted tiny">→</span>
       <input class="cellin" id="ff-max" style="max-width:110px" placeholder="max e.g. 1.5b" value="${esc(S.ff.match.max)}" spellcheck="false">
       <span class="chip">${matched.length}/${rows.length} in range · ${esc(ffRangeLabel(bounds))}</span>
-      ${S.ff.myEst ? `<span class="chip you" title="Your own FF Scouter estimate (auto-detected from your key)">my est ${fmtBS(S.ff.myEst)}</span>` : '<span class="muted tiny">anchor: ' + (bounds.anchor === 'ff' ? 'FF bands (your estimate pending)' : bounds.anchor) + '</span>'}
+      ${S.ff.myEst ? `<span class="chip you" title="Your own FF Scouter estimate (auto-detected from your key)">my est ${fmtBS(S.ff.myEst)}</span>`
+        : ffFallbackAll ? '<span class="chip soon" title="FF Scouter has no estimate for you yet and members have no personalized FF values — nothing would match, so everyone is shown">your estimate pending — showing all members</span>'
+        : `<span class="chip soon" title="Matching by FF bands (FF ≤ 1.33 soft · 1.33–2.33 fair · > 2.33 tough) until your own estimate is available">anchor: FF bands${S.ff.myNoEst ? ' (no estimate for you yet)' : ' (pending…)'}</span>`}
       <span class="spacer"></span>
       <button class="btn small" data-action="ff-add-matches" ${matched.length && (registered || S.demo) ? '' : 'disabled'} title="Add every matching member to the hit list (P2)">＋ list all matches</button>
     </div>
-    ${scouted && !matched.length ? '<div class="pad center muted tiny" style="padding:18px">no members match this stat range — widen it or re-scout</div>' : ''}
+    ${scouted && !matched.length ? `<div class="pad center muted tiny" style="padding:18px">no members match this stat range — widen it or ↻ re-scout${bounds.mode === 'ff' ? '<br><span class="tiny">note: with FF-band matching, members without a personalized FF value (common until your battlestats are registered with FF Scouter) cannot be rated</span>' : ''}</div>` : ''}
     ${scouted && matched.length ? `
     <div class="tblscroll" style="max-height:430px"><table class="tbl">
       <thead><tr>${th('name', 'Member')}${th('level', 'Lvl', 'num')}${th('status', 'Status')}${th('ff', 'FF', 'num')}${th('est', 'Est total')}${'<th>Stat detail</th>'}${'<th>Src</th>'}${'<th></th>'}</tr></thead>
@@ -1348,6 +1452,8 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
   enriched.sort((a, b) => dir * ((a.est == null ? Infinity : a.est) - (b.est == null ? Infinity : b.est)));
   const scoutedOwn = enriched.filter((x) => x.rec).length;
   const totalOwn = allRows.length;
+  const wk = wkState(war, ownFac.id);
+  const wkTotal = Object.values(wk.counts || {}).reduce((a, b) => a + b, 0);
   const trs = enriched.map(({ m, rec, est }) => {
     const si = statusInfo(m);
     const band = ffBand(rec);
@@ -1355,6 +1461,7 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
     const open = S.ff.popup === m.id;
     return `<tr class="${open ? 'popup-open' : ''}">
       <td><button class="btnlink" data-action="open-member" data-pid="${m.id}" title="Open FF Scouter card + targets in stat range for ${esc(m.name)}">${esc(m.name)}</button><div class="muted tiny">#${m.id}</div></td>
+      <td class="num mono" title="Won attacks vs war opponents — live tally from the faction attacks feed">${wk.counts && wk.counts[m.id] ? '<b>' + fmtInt(wk.counts[m.id]) + '</b>' : '<span class="muted">0</span>'}</td>
       <td class="num">${m.level}</td>
       <td class="status-${si.cls} tiny">${si.label}</td>
       <td class="num mono">${est ? fmtBS(est) : '—'}</td>
@@ -1370,6 +1477,8 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
         <input type="text" id="squad-search" placeholder="Search member (name or id)…" value="${esc(S.ff.squadSearch || '')}" spellcheck="false" style="width:200px;background:var(--panel2);border:1px solid var(--line);color:var(--txt);border-radius:8px;padding:6px 10px;font-size:12.5px;outline:none">
         ${q ? `<button class="btn small icon del" data-action="clear-squad-search" title="Clear search">✕</button>` : ''}
         <span class="spacer"></span>
+        ${S.warkillsErr === 'limited' ? '<span class="chip soon" title="The faction attacks feed needs a Limited (or better) API key — kills cannot be tallied with a Public key">⚠ kills need Limited key</span>'
+          : `<span class="chip" title="Won attacks vs war opponents, tallied live from the faction attacks feed">⚔ ${fmtInt(wkTotal)} war kills${wk.done ? '' : ' (counting…)'}</span>`}
         <span class="muted tiny">${q ? enriched.length + ' of ' + totalOwn + ' shown · ' : ''}${scoutedOwn}/${totalOwn} scouted · range preset follows the selector above</span>
       </div>
       ${!totalOwn ? '<div class="tiny muted blink" style="margin-top:6px">waiting for your faction roster…</div>'
@@ -1377,7 +1486,7 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
     </div>
     ${rows.length ? `
     <div class="tblscroll" style="max-height:330px"><table class="tbl">
-      <thead><tr><th>Member</th><th class="num">Lvl</th><th>Status</th><th class="num">Est total</th><th>Band</th><th class="num">Enemy targets</th></tr></thead>
+      <thead><tr><th>Member</th><th class="num" title="Won attacks vs war opponents this war — live tally from the faction attacks feed (Limited key)">KILLS</th><th class="num">Lvl</th><th>Status</th><th class="num">Est total</th><th>Band</th><th class="num">Enemy targets</th></tr></thead>
       <tbody>${trs}</tbody>
     </table></div>` : ''}
   </div>`;
@@ -1640,6 +1749,155 @@ function seedDemoHits() {
   if (seed && seed.length && !hitsGet(9121).length) hitsSet(9121, seed);
 }
 
+/* ----- the war report tab ----- */
+async function loadWarReportWars(fidRaw) {
+  const fid = parseInt(fidRaw || S.wrep.faction || S.pin, 10);
+  if (!fid) { S.wrep.err = 'Enter a faction id (or set your pin) to load its war reports.'; renderView(); return; }
+  S.wrep.loading = true; S.wrep.err = null; renderView();
+  try {
+    const d = await torn(`/faction/${fid}/rankedwars`, { sort: 'DESC', limit: 100 });
+    S.wrep.rows = (d.rankedwars || []).map(normalizeWar).filter(Boolean);
+    S.wrep.faction = String(fid);
+    try { store.rw_wrepfaction = String(fid); } catch (e) {}
+    const def = S.wrep.rows.find((w) => warPhase(w) !== 'done') || S.wrep.rows[0] || null;
+    S.wrep.data = null;
+    S.wrep.warId = def ? def.id : null;
+    S.wrep.loading = false;
+    renderView();
+    if (def && warPhase(def) === 'done') await loadWarReport(def.id);
+  } catch (e) {
+    S.wrep.err = (e && e.error && (e.error.error || e.error.code)) || 'Failed to load war list';
+    S.wrep.loading = false;
+    renderView();
+  }
+}
+async function loadWarReport(warId) {
+  S.wrep.warId = +warId;
+  S.wrep.loadingWar = true; S.wrep.err = null; renderView();
+  try {
+    const d = await torn(`/faction/${warId}/rankedwarreport`);
+    S.wrep.data = d.rankedwarreport || d;
+  } catch (e) {
+    S.wrep.data = null;
+    S.wrep.err = (e && e.error && (e.error.error || e.error.code)) || 'Failed to load war report';
+  }
+  S.wrep.loadingWar = false;
+  renderView();
+}
+function wrepMemberRows(f, sortKey) {
+  const rows = (f.members || []).slice();
+  rows.sort((a, b) => sortKey === 'score' ? b.score - a.score : (b.attacks - a.attacks) || (b.score - a.score));
+  return rows;
+}
+function renderWarReport() {
+  if (!S.key && !S.demo) { renderWelcome(); return; }
+  const w = S.wrep;
+  const fid = w.faction || S.pin;
+  let body = '';
+  if (w.loading) body = '<div class="skeleton blink">LOADING WARS…</div>';
+  else if (w.err) body = `<div class="panel pad muted">⚠ ${esc(String(w.err))}</div>`;
+  else if (!w.rows) body = `<div class="panel pad center muted" style="padding:34px">Pick a faction and load its war reports.<br><span class="tiny">Defaults to your own faction (auto-detected from your key).</span></div>`;
+  else if (!w.rows.length) body = '<div class="panel pad center muted">No ranked wars found for this faction.</div>';
+  else {
+    const war = w.rows.find((x) => x.id === w.warId) || w.rows[0];
+    const opts = w.rows.map((x) => `<option value="${x.id}" ${x.id === war.id ? 'selected' : ''}>#${x.id} — ${esc(x.factions.map((f) => f.name).join(' vs '))}${warPhase(x) !== 'done' ? ' (in progress)' : ''}</option>`).join('');
+    const ongoing = warPhase(war) !== 'done';
+    let inner = '';
+    if (w.loadingWar) inner = '<div class="skeleton blink">LOADING REPORT…</div>';
+    else if (ongoing) {
+      inner = `
+      <div class="panel pad" style="padding:22px">
+        <div class="row wrap" style="gap:10px;margin-bottom:10px">
+          <span class="chip live">IN PROGRESS</span>
+          <span class="muted tiny">war started ${fmtDate(war.start, true)} · target ${fmtInt(war.target)}</span>
+        </div>
+        <div class="sb-grid">
+          ${war.factions.map((f, i) => `<div class="sb-f ${i ? 'right' : 'left'}">
+            <div class="sb-name">${+S.pin === f.id ? '<span class="chip you">YOU</span> ' : ''}${esc(f.name)}</div>
+            <div class="sb-score">${fmtInt(f.score)}</div>
+            <div class="wc-sub">${pct(f.score, war.target)}% of target ${f.chain ? `· ⚡ ${fmtInt(f.chain)}` : ''}</div>
+          </div>`).join('<div class="center muted tiny" style="letter-spacing:.2em">VS</div>')}
+        </div>
+        <p class="muted tiny" style="margin-bottom:0">Torn publishes per-member kills, assets and respect only when the war ends and the report is generated. This page fills in automatically — until then, live per-member target stats live in THE HIT CLUB.</p>
+      </div>`;
+    } else if (!w.data || w.data.id !== war.id) {
+      inner = '<div class="skeleton blink">LOADING REPORT…</div>';
+    } else {
+      const rep = w.data;
+      const winner = rep.factions.find((f) => f.id === rep.winner);
+      const assetBlocks = rep.factions.map((f) => `
+        <div class="panel pad" style="flex:1 1 320px">
+          <div class="row wrap" style="gap:8px;margin-bottom:6px">
+            <b>${esc(f.name)}</b>
+            <span class="chip ${rep.winner === f.id ? 'win' : 'loss'}">${rep.winner === f.id ? 'WINNER' : 'LOST'}</span>
+            <span class="spacer"></span>
+            <span class="muted tiny">rank ${esc(f.rank.before)} <span class="rankarrow">${rep.winner === f.id ? '▲' : '▼'}</span> ${esc(f.rank.after)}</span>
+          </div>
+          <div class="row wrap" style="gap:7px">
+            <span class="chip" title="Respect awarded to the faction">💰 respect <b>${fmtInt(f.rewards.respect)}</b></span>
+            <span class="chip" title="Points awarded to the faction">⭐ points <b>${fmtInt(f.rewards.points)}</b></span>
+            <span class="chip" title="Total attacks by this faction">⚔ attacks <b>${fmtInt(f.attacks)}</b></span>
+            ${(f.rewards.items || []).map((it) => `<span class="reward-chip">📦 ${esc(it.name)} ×${fmtInt(it.quantity)}</span>`).join('') || '<span class="muted tiny">no item assets</span>'}
+          </div>
+        </div>`).join('');
+      const tables = rep.factions.map((f) => {
+        const rows = wrepMemberRows(f, w.sort);
+        const totA = rows.reduce((a, m) => a + (m.attacks || 0), 0);
+        const totS = rows.reduce((a, m) => a + (m.score || 0), 0);
+        const maxScore = Math.max(...rows.map((m) => m.score), 1);
+        return `
+        <div class="panel" style="flex:1 1 460px">
+          <div class="rf-head">
+            <span class="sb-name">${esc(f.name)}</span>
+            <span class="rf-score mono">${fmtInt(f.score)}</span>
+            <span class="spacer"></span>
+            <span class="muted tiny">${rows.length} members</span>
+          </div>
+          <div class="tblscroll" style="max-height:430px"><table class="tbl">
+            <thead><tr><th>#</th><th>Member</th><th class="num">Lvl</th><th class="num" title="Attacks recorded for this member in the war">KILLS*</th><th class="num" title="Member's war score (contribution points)">RESPECT*</th><th>Share</th></tr></thead>
+            <tbody>${rows.map((m, i) => `<tr>
+              <td class="muted num">${i + 1}</td>
+              <td><a href="https://www.torn.com/profiles.php?XID=${m.id}" target="_blank" rel="noopener">${esc(m.name)}</a></td>
+              <td class="num">${m.level}</td>
+              <td class="num mono"><b>${fmtInt(m.attacks)}</b></td>
+              <td class="num mono">${fmtF1(m.score)}</td>
+              <td class="barcell"><span class="bg" style="width:${Math.max(2, (m.score / maxScore) * 100)}%"></span>&nbsp;${Math.round((m.score / (f.score || 1)) * 100)}%</td>
+            </tr>`).join('')}
+            <tr><td></td><td><b>TOTAL</b></td><td></td><td class="num mono"><b>${fmtInt(totA)}</b></td><td class="num mono"><b>${fmtInt(totS)}</b></td><td></td></tr>
+            </tbody>
+          </table></div>
+        </div>`;
+      }).join('');
+      inner = `
+        <div class="row wrap" style="gap:8px;margin:0 0 12px">
+          <span class="chip ${rep.winner ? 'win' : 'draw'}">${winner ? 'WINNER: ' + esc(winner.name) : 'NO CONTEST'}</span>
+          <span class="muted tiny">${fmtDate(rep.start, true)} → ${fmtDate(rep.end, true)} · lasted ${fmtDurShort((rep.end - rep.start) * 1000)} · target ${fmtInt(war.target)}${rep.forfeit ? ' · <b>FORFEIT</b>' : ''}</span>
+          <span class="spacer"></span>
+          <label class="muted tiny">sort members by</label>
+          <select id="wrep-sort">
+            <option value="kills" ${w.sort === 'kills' ? 'selected' : ''}>kills</option>
+            <option value="score" ${w.sort === 'score' ? 'selected' : ''}>respect</option>
+          </select>
+        </div>
+        <div class="row wrap" style="gap:10px;margin-bottom:14px">${assetBlocks}</div>
+        <div class="row wrap" style="gap:14px;align-items:flex-start">${tables}</div>
+        <p class="muted tiny" style="margin-top:10px">* Torn's official war report records each member's <b>attacks</b> (shown as kills) and <b>war score</b> (shown as respect). Separate per-member kill counts, mugged assets and respect splits are not published by the API — faction-wide respect, points and item rewards are shown in the asset strips above.</p>`;
+    }
+    body = `
+      <div class="toolbar">
+        <input type="number" id="wrep-faction" placeholder="Faction id" value="${esc(w.faction)}" style="width:140px">
+        <button class="btn small" data-action="wrep-load">Load</button>
+        ${S.pin && +S.pin !== +w.faction ? `<button class="btn small" data-action="wrep-use-pin">use pinned (${esc(S.pin)})</button>` : ''}
+        <span class="spacer"></span>
+        <label class="muted tiny">war</label>
+        <select id="wrep-war" style="min-width:250px">${opts}</select>
+      </div>
+      ${inner}`;
+  }
+  view.innerHTML = body;
+  restoreFocus();
+}
+
 /* ----- history tab ----- */
 function renderHistory() {
   if (!S.key && !S.demo) { renderWelcome(); return; }
@@ -1780,6 +2038,7 @@ function renderView() {
   if (S.tab === 'wars') renderWars();
   else if (S.tab === 'room') renderRoom();
   else if (S.tab === 'hits') renderHits();
+  else if (S.tab === 'wrep') renderWarReport();
   else if (S.tab === 'history') {
     if (S.report.loading || S.report.err || S.report.data) renderReport();
     else renderHistory();
@@ -1802,7 +2061,15 @@ async function refreshData() {
         const war = S.wars.find((w) => w.id === warId);
         if (war && war.factions.length === 2) {
           await loadRosters(war); // also useful before the war starts (prep view)
-          if (S.tab === 'hits') await loadChains(war);
+          if (S.tab === 'hits') {
+            await loadChains(war);
+            const of_ = S.pin ? war.factions.find((f) => +f.id === +S.pin) : null;
+            if (of_) {
+              const enemySide = war.factions.find((f) => +f.id !== +of_.id);
+              const eRoster = enemySide && +enemySide.id === +war.factions[0].id ? S.room.rosterA : S.room.rosterB;
+              if (eRoster && eRoster.length) loadWarKills(war, +of_.id, new Set(eRoster.map((m) => +m.id)));
+            }
+          }
           if (S.tab === 'hits' && (S.key || S.demo)) {
             ensureMyIdentity(); // non-blocking: anchor stat-range matching to your own estimate
             if (!S.ff.autoTried) { S.ff.autoTried = true; ffCheck(); }
@@ -1876,7 +2143,7 @@ async function autoDetectFaction() {
       S.pinAuto = true;
       S.myFaction = { id: +id, name: b.name || 'Faction #' + id };
       persist();
-      if (S.tab === 'hits' || S.tab === 'room') refreshData();
+      if (S.tab === 'hits' || S.tab === 'room' || S.tab === 'wrep') { if (S.tab === 'wrep' && !S.wrep.rows) loadWarReportWars(); else refreshData(); }
       else renderView();
     }
   } catch (e) { /* key has no faction or can't read it — manual pin still available */ }
@@ -1953,6 +2220,7 @@ document.addEventListener('click', (e) => {
       if (!S.hist.rows && S.hist.faction) loadHistory(S.hist.faction);
     }
     renderView();
+    if (S.tab === 'wrep' && (S.key || S.demo) && !S.wrep.rows && !S.wrep.loading) loadWarReportWars();
     if ((S.tab === 'room' || S.tab === 'hits') && (S.key || S.demo)) refreshData(); // load immediately, don't wait for the poll tick
   }
   else if (act === 'open-war') { S.room.warId = +el.dataset.war; S.room.rosterA = S.room.rosterB = null; S.room.rosterErr = {}; S.tab = 'room'; refreshData(); }
@@ -2041,6 +2309,8 @@ document.addEventListener('click', (e) => {
     renderView();
   }
   else if (act === 'clear-squad-search') { S.ff.squadSearch = ''; renderView(); }
+  else if (act === 'wrep-load') { loadWarReportWars($('#wrep-faction').value); }
+  else if (act === 'wrep-use-pin') { loadWarReportWars(S.pin); }
   else if (act === 'open-member') { S.ff.popup = +el.dataset.pid; renderView(); }
   else if (act === 'close-member') { if (el === e.target) { S.ff.popup = null; renderView(); } }
   else if (act === 'copy-member-discord') {
@@ -2099,6 +2369,8 @@ document.addEventListener('change', (e) => {
   else if (t.id === 'room-sortcol') { S.room.sortBy = t.value; renderView(); }
   else if (t.id === 'ff-preset') { S.ff.match.preset = t.value; renderView(); }
   else if (t.id === 'ff-consent') { S.ff.consent = t.checked; try { store.rw_ff_consent = t.checked ? '1' : '0'; } catch (e) {} }
+  else if (t.id === 'wrep-war') { const war = (S.wrep.rows || []).find((x) => x.id === +t.value); if (war && warPhase(war) === 'done') loadWarReport(war.id); else { S.wrep.warId = +t.value; S.wrep.data = null; renderView(); } }
+  else if (t.id === 'wrep-sort') { S.wrep.sort = t.value; renderView(); }
   else if (t.id === 'hits-side') {
     const war = S.wars.find((w) => w.id === S.room.warId);
     if (war) S.hits.side[war.id] = +t.value;
@@ -2134,6 +2406,7 @@ document.addEventListener('keydown', (e) => {
     const t = e.target;
     if (t.id === 'key-input') { S.key = t.value.trim(); persist(); renderTabs(); if (S.key) { S.warsLoaded = false; refreshData(); } }
     else if (t.id === 'hist-faction') loadHistory(t.value);
+    else if (t.id === 'wrep-faction') loadWarReportWars(t.value);
     else if (t.id === 'pin-input') { S.pin = t.value.trim(); persist(); renderView(); }
   }
   if (e.key === 'Enter' && e.target.closest && e.target.closest('.warcard')) {

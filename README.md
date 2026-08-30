@@ -8,6 +8,8 @@ A live tracker for [Torn](https://www.torn.com)'s **Ranked Wars** — unofficial
 
 - **Live Wars** — every ongoing & scheduled ranked war on Torn: both faction scores, chains, target %, dominance bar, war countdowns. Auto-refreshes (10–60 s, configurable).
 - **War Room** — pick any war for a big scoreboard (scores, target, lead, end-of-war countdown), a score-progression chart, and **both rosters** with live statuses: hospital/jail timers, traveling, last action, wall defenders, revivers. Filter to *attackable* players (okay or leaving hospital <10 min).
+- **War report tab** — pick a faction (defaults to yours): per-member **kills** (attacks), **respect** (war score) and **share %** with bars and totals, plus faction **assets** — respect, points and item rewards — for any finished ranked war. Ongoing wars show live faction scores and unlock the member report automatically once Torn generates it.
+- **Squad kills column** — the YOUR SQUAD table shows each member's **war kills** (won attacks vs war opponents), tallied live from the faction attacks feed (`is_ranked_war` filter, incremental + cached across reloads; needs a Limited key — Public keys see a clear hint instead).
 - **Chain meter** — the Hit Club's ADD TARGETS box shows live ranked-war chains for **both** factions (`/faction/{id}/chain`): current/max hits, respect modifier, a countdown bar for the chain timer, and milestone-cooldown status. The meter **flashes red when the chain timer drops to ≤ 1 minute** so you know to keep hitting.
 - **Squad matchups + FF Scouter member cards** — the Hit Club also lists **your own faction's members** with their FF Scouter estimates, and shows how many enemy members fall in each member's stat range. Clicking a member opens an **FF Scouter card popup**: their estimate, stat detail/source, status, and a ready-to-work list of **opponents in stat range for that specific member** (est, level, live hospital timer, ⚔ attack link, + list).
 - **Your faction's war, automatically** — your faction is detected from your key (`/faction/basic`); your current ranked war is read straight from `/faction/wars` (authoritative even when the global list lags), badged **YOUR WAR** everywhere, and the Hit Club locks onto it with the opponent auto-selected as the target side (with a one-click switch-back if you browse another war).
@@ -61,6 +63,8 @@ public/
 | `GET /faction/{id}/rankedwars` | war history of a faction |
 | `GET /faction/{warId}/rankedwarreport` | finished-war report incl. member scores |
 | `GET /faction/{id}/chain` | live chain count + break-timer for both war factions |
+| `GET /faction/{id}/attacks` | per-member war-kill tally (Limited key) |
+| `GET /faction/{id}/rankedwars` + `/faction/{warId}/rankedwarreport` | per-member kills/score & faction rewards for the war report tab |
 | `GET /faction/basic` | detect the key owner's faction |
 
 **FF Scouter** (via `ffscouter.com/api/v1`, proxied through `/api/ffscouter`): `get-stats` (batched stat estimates), `check-key`, `register` — your Torn key must be registered once with FF Scouter; the app does it in-tab with your consent.

@@ -37,10 +37,10 @@ function cacheSet(k, status, body) {
 /* ------------------------------------------------------------ validation */
 const PATH_OK = [
   /^\/faction\/(basic|members|wars|warfareranked|rankedwars|rankedwarreport)$/,
-  /^\/faction\/\d+\/(basic|members|wars|rankedwars|rankedwarreport|chain)$/,
+  /^\/faction\/\d+\/(basic|members|wars|rankedwars|rankedwarreport|chain|attacks)$/,
   /^\/user\/(basic|profile)$/,
 ];
-const PARAM_OK = new Set(['sort', 'from', 'to', 'limit', 'offset', 'cat', 'striptags', 'timestamp']);
+const PARAM_OK = new Set(['sort', 'from', 'to', 'limit', 'offset', 'cat', 'striptags', 'timestamp', 'filters']);
 
 /* ------------------------------------------------------------ torn proxy */
 function fetchTorn(v2path, params) {
