@@ -104,6 +104,7 @@ const S = {
   demo: store.rw_demo === '1',
   interval: parseInt(store.rw_interval || '15', 10),
   tab: 'wars',
+  chains: {},
   pin: store.rw_pin || '',
   pinAuto: false,
   pinAutoTried: false,
@@ -116,7 +117,7 @@ const S = {
   report: { warId: null, data: null, loading: false, err: null },
   myFaction: null,
   hits: { search: '', copiedAt: 0, side: {} },
-  ff: { status: null, statusErr: null, checking: false, registering: false, scouting: false, scoutProg: null, data: {}, err: null, sort: 'est', dir: 1, consent: store.rw_ff_consent === '1', autoTried: false, lastScoutAt: 0, match: { preset: 'all', min: '', max: '' }, myId: null, myName: null, myEst: null, popup: null, squadSearch: '' },
+  ff: { status: null, statusErr: null, checking: false, registering: false, scouting: false, scoutProg: null, data: {}, err: null, sort: 'est', dir: 1, consent: store.rw_ff_consent === '1', autoTried: false, lastScoutAt: 0, match: { preset: 'all', min: '', max: '' }, myId: null, myName: null, myEst: null, popup: null, squadSearch: '', discCopiedAt: 0 },
   err: null,
   nextAt: 0,
   busy: false,
@@ -226,6 +227,25 @@ const Demo = (() => {
   const rosters = {};
   FAC.forEach((f) => { rosters[f.id] = makeRoster(f.id); });
 
+  // simulated chains (own faction + first enemy) — ticks down, random hits keep them alive
+  const chains = {
+    33421: { current: 137, max: 150, modifier: 1.1, timeout: 58, cooldown: 0 },
+    41190: { current: 61, max: 100, modifier: 1.2, timeout: 33, cooldown: 0 },
+  };
+  function tickChains(secElapsed) {
+    const nowS = Date.now() / 1000;
+    Object.values(chains).forEach((c) => {
+      if (c.cooldown > nowS) return; // cooling down — timer paused
+      c.timeout -= secElapsed;
+      if (c.timeout <= 0) { c.current = 0; c.timeout = 0; } // chain broke
+      if (c.current > 0 && Math.random() < 0.45) {
+        c.current += 1;
+        c.timeout = 85; // someone hit — timer resets
+        if (c.current >= c.max) { c.cooldown = Math.floor(nowS + 600); c.max = c.current + 50; } // milestone cooldown
+      }
+    });
+  }
+
   const NOW = Date.now() / 1000;
   const wars = [
     { id: 9121, start: NOW - 43 * 3600, end: NOW + 13.4 * 3600, target: 16500, winner: 0, factions: [{ id: 33421, score: 9412, chain: 12, rate: 11.5 }, { id: 41190, score: 8204, chain: 0, rate: 9.2 }], _sched: 3.6 * 86400 },
@@ -254,8 +274,10 @@ const Demo = (() => {
   let lastTick = Date.now();
   function tick() {
     const now = Date.now();
-    const mins = Math.min((now - lastTick) / 60000, 30); // cap catch-up
+    const secElapsed = Math.min((now - lastTick) / 1000, 120);
+    const mins = secElapsed / 60; // cap catch-up
     lastTick = now;
+    tickChains(secElapsed);
     const nowS = now / 1000;
     wars.forEach((w) => {
       if (w.start > nowS) return;
@@ -395,6 +417,12 @@ const Demo = (() => {
     if (pathname === '/faction/basic') { const f = fac(33421); return { basic: { id: f.id, name: f.name, tag: f.tag, leader: 1, 'co-leader': 2, respect: 125000, age: 1900, capacity: 25, best_chain: 241, rank: { level: 3, name: 'Silver', division: 1, position: 42, wins: 12 } } }; }
     let m = pathname.match(/^\/faction\/(\d+)\/members$/);
     if (m) return { members: rosters[+m[1]] };
+    m = pathname.match(/^\/faction\/(\d+)\/chain$/);
+    if (m) {
+      const c = chains[+m[1]];
+      if (!c || !c.current) return { chain: null };
+      return { chain: { id: 1, current: c.current, max: c.max, timeout: c.timeout, modifier: c.modifier, cooldown: c.cooldown, start: Math.floor(NOW - 3600), end: 0 } };
+    }
     m = pathname.match(/^\/faction\/(\d+)\/rankedwars$/);
     if (m) return { rankedwars: finished.filter((w) => w.factions.some((f) => f.id === +m[1])) };
     m = pathname.match(/^\/faction\/(\d+)\/rankedwarreport$/);
@@ -1016,6 +1044,84 @@ function warSelectOptions() {
     .map((w) => `<option value="${w.id}" ${w.id === S.room.warId ? 'selected' : ''}>${w.own ? '★ ' : ''}#${w.id} — ${esc(w.factions[0].name)} vs ${esc(w.factions[1].name)}${w.own ? ' (your war)' : ''}</option>`).join('');
 }
 
+/* ----- faction chain meters (GET /faction/{id}/chain, public) ----- */
+function fmtMS(sec) {
+  sec = Math.max(0, Math.floor(sec));
+  return Math.floor(sec / 60) + ':' + pad2(sec % 60);
+}
+async function loadChains(war) {
+  const jobs = war.factions.map(async (f) => {
+    try {
+      const d = await torn(`/faction/${f.id}/chain`);
+      const c = d && d.chain;
+      if (!c || !+c.current) { S.chains[f.id] = { none: true, at: Date.now() }; return; }
+      S.chains[f.id] = {
+        none: false,
+        current: +c.current || 0,
+        max: +c.max || 0,
+        modifier: +c.modifier || 1,
+        timeoutAt: +c.timeout > 0 ? Date.now() + (+c.timeout) * 1000 : 0,
+        cooldownAt: +c.cooldown > Date.now() / 1000 ? (+c.cooldown) * 1000 : 0,
+        at: Date.now(),
+      };
+    } catch (e) { /* chain data is optional — leave previous state */ }
+  });
+  await Promise.all(jobs);
+}
+function chainMeterHTML(war) {
+  return war.factions.map((f) => {
+    const mine = !!S.pin && +f.id === +S.pin;
+    const c = S.chains[f.id];
+    const active = c && !c.none;
+    return `<div class="chainmeter" data-chmeter="${f.id}">
+      <div class="cm-top">
+        <span class="cm-tag ${mine ? 'you' : 'enemy'}">${mine ? 'OUR CHAIN' : 'THEIR CHAIN'}</span>
+        <span class="cm-name" title="${esc(f.name)}">${esc(f.name)}</span>
+        <span class="spacer"></span>
+        ${active ? `<span class="cm-count">${fmtInt(c.current)}</span><span class="cm-max">/ ${fmtInt(c.max)}</span>` : '<span class="muted tiny">no chain</span>'}
+      </div>
+      <div class="cm-bar"><div class="fill"></div></div>
+      <div class="cm-sub">
+        <span class="cm-timer">—</span>
+        <span class="cm-cool"></span>
+        <span class="spacer"></span>
+        ${active && c.modifier && c.modifier !== 1 ? `<span class="cm-mod">×${c.modifier} respect</span>` : ''}
+      </div>
+    </div>`;
+  }).join('');
+}
+function tickChainMeters() {
+  const now = Date.now();
+  $$('[data-chmeter]').forEach((el) => {
+    const c = S.chains[+el.dataset.chmeter];
+    const bar = el.querySelector('.cm-bar .fill');
+    const timer = el.querySelector('.cm-timer');
+    const cool = el.querySelector('.cm-cool');
+    if (!c || c.none) {
+      if (timer) timer.textContent = 'no active chain';
+      if (bar) bar.style.width = '0%';
+      el.classList.remove('flash');
+      return;
+    }
+    const cooling = c.cooldownAt && c.cooldownAt > now;
+    if (cooling) {
+      if (cool) cool.textContent = 'cooldown ' + fmtMS((c.cooldownAt - now) / 1000);
+      if (timer) timer.textContent = 'timer paused';
+      if (bar) bar.style.width = '100%';
+      el.classList.remove('flash');
+      el.classList.add('cooling');
+      return;
+    }
+    el.classList.remove('cooling');
+    if (cool) cool.textContent = '';
+    let rem = c.timeoutAt ? Math.floor((c.timeoutAt - now) / 1000) : 0;
+    if (rem < 0) rem = 0;
+    if (timer) timer.textContent = rem > 0 ? fmtMS(rem) + ' to break' : '0:00 — broke?';
+    if (bar) bar.style.width = Math.max(0, Math.min(100, (rem / 90) * 100)) + '%';
+    el.classList.toggle('flash', rem > 0 && rem <= 60); // FLASH at <= 1 minute
+  });
+}
+
 function hitSideIdx(war) {
   const [a, b] = war.factions;
   if (+S.pin === a.id) return 1;
@@ -1069,7 +1175,7 @@ function ffInRange(rec, b) {
   return true;
 }
 function ffRangeLabel(b) {
-  if (b.anchor === 'all') return 'all members';
+  if (!b || b.anchor === 'all') return 'all members';
   if (b.mode === 'est') {
     const lo = b.min != null ? fmtBS(b.min) : '0';
     const hi = b.max != null ? fmtBS(b.max) : '∞';
@@ -1277,6 +1383,49 @@ function squadPanel(war, ownFac, ownRoster, enemyRoster) {
   </div>`;
 }
 
+function memberDiscordText() {
+  const war = S.wars.find((w) => w.id === S.room.warId);
+  if (!war || !S.ff.popup) return null;
+  const sideIdx = hitSideIdx(war);
+  const enemyRoster = sideIdx === 0 ? S.room.rosterA : S.room.rosterB;
+  const enemy = war.factions[sideIdx];
+  const ownFac = S.pin ? war.factions.find((f) => +f.id === +S.pin) : null;
+  const all = (S.room.rosterA || []).concat(S.room.rosterB || []);
+  const m = all.find((x) => x.id === S.ff.popup);
+  if (!m || !enemyRoster) return null;
+  const rec = ffDataFor(m.id);
+  const est = ffEst(rec);
+  const band = ffBand(rec);
+  const si = statusInfo(m);
+  const strip = (s) => String(s).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  const b = squadBounds(est);
+  const listedSet = new Set(hitsGet(war.id).map((x) => x.id));
+  const matches = enemyRoster
+    .map((x) => ({ x, rec2: ffDataFor(x.id), est2: ffEst(ffDataFor(x.id)) }))
+    .filter((r) => !listedSet.has(r.x.id) && ffInRange(r.rec2, b))
+    .sort((a, c) => (a.est2 || Infinity) - (c.est2 || Infinity));
+  const lines = [];
+  lines.push(`\u2620 FF SCOUTER CARD \u2014 ${m.name} [lvl ${m.level}] (#${m.id})`);
+  lines.push(`${ownFac ? ownFac.name + ' vs ' : ''}${enemy.name} \u2014 War #${war.id}${war.target ? ' \u00b7 target ' + fmtInt(war.target) : ''}`);
+  lines.push(`Est total: ${est ? fmtBS(est) + ' (' + band.label + ')' : 'no data'}${rec && rec.d.source ? ' \u00b7 source: ' + rec.d.source : ''}${rec && rec.d.last_updated ? ' \u00b7 updated ' + ago(rec.d.last_updated) : ''}`);
+  lines.push(`Status: ${strip(si.label)}`);
+  const spy = rec && Array.isArray(rec.d.spies) && rec.d.spies[0];
+  if (spy) {
+    lines.push(`Spy: STR ${fmtBS(spy.strength)} \u00b7 DEF ${fmtBS(spy.defense)} \u00b7 SPD ${fmtBS(spy.speed)} \u00b7 DEX ${fmtBS(spy.dexterity)} \u2014 ${spy.source || '?'}${spy.last_updated ? ' (' + ago(spy.last_updated) + ')' : ''}`);
+  } else if (rec && rec.d.distribution && rec.d.distribution.distribution_human) {
+    lines.push(`Distribution: ${rec.d.distribution.distribution_human}`);
+  }
+  lines.push('');
+  lines.push(`\ud83c\udfaf TARGETS IN STAT RANGE (${ffRangeLabel(b)}): ${matches.length}`);
+  matches.forEach((r, i) => {
+    lines.push(`${i + 1}. ${r.x.name} [lvl ${r.x.level}] #${r.x.id} \u2014 ${r.est2 ? 'est ' + fmtBS(r.est2) : 'no est'} \u2014 ${strip(statusInfo(r.x).label)}${ffFf(r.rec2) != null ? ' \u2014 FF ' + ffFf(r.rec2).toFixed(2) : ''} \u2014 https://www.torn.com/loader.php?sid=attack&user2ID=${r.x.id}`);
+  });
+  if (!matches.length) lines.push('(no unlisted enemies in range)');
+  lines.push('');
+  lines.push(`profile: https://www.torn.com/profiles.php?XID=${m.id}`);
+  return lines.join('\n');
+}
+
 function memberPopup(war, enemy, enemyRoster, ownFac) {
   const pid = S.ff.popup;
   const all = (S.room.rosterA || []).concat(S.room.rosterB || []);
@@ -1301,6 +1450,7 @@ function memberPopup(war, enemy, enemyRoster, ownFac) {
         <span class="sb-name"><a href="https://www.torn.com/profiles.php?XID=${m.id}" target="_blank" rel="noopener" style="color:inherit">${esc(m.name)}</a></span>
         <span class="muted tiny">lvl ${m.level} · #${m.id} · ${esc(ownFac ? ownFac.name : '')}</span>
         <span class="spacer"></span>
+        <button class="btn small" data-action="copy-member-discord" title="Copy this FF Scouter card + its targets formatted for Discord">${Date.now() - S.ff.discCopiedAt < 2200 ? 'COPIED \u2713' : '\u29c9 Discord'}</button>
         <button class="btn small icon del" data-action="close-member" title="Close">✕</button>
       </div>
       <div class="modal-body">
@@ -1456,6 +1606,11 @@ function renderHits() {
           : '<span class="muted tiny blink">loading roster…</span>'}
       </div>
       ${q ? (matchRows ? `<div style="margin-top:8px">${matchRows}</div>` : '<div class="muted tiny" style="margin-top:8px">no unlisted members match</div>') : ''}
+    </div>
+
+    <div class="row wrap" style="gap:10px;margin:-6px 0 14px">
+      <span class="muted tiny" style="letter-spacing:.14em;font-weight:800">CHAIN METER</span>
+      ${chainMeterHTML(war)}
     </div>
 
     ${ffPanelHtml}
@@ -1647,6 +1802,7 @@ async function refreshData() {
         const war = S.wars.find((w) => w.id === warId);
         if (war && war.factions.length === 2) {
           await loadRosters(war); // also useful before the war starts (prep view)
+          if (S.tab === 'hits') await loadChains(war);
           if (S.tab === 'hits' && (S.key || S.demo)) {
             ensureMyIdentity(); // non-blocking: anchor stat-range matching to your own estimate
             if (!S.ff.autoTried) { S.ff.autoTried = true; ffCheck(); }
@@ -1766,6 +1922,7 @@ setInterval(() => {
     if (el.dataset.short) el.textContent = fmtDurShort(rem);
     else el.textContent = rem <= 0 ? 'ENDED' : fmtDur(rem);
   });
+  tickChainMeters();
   const nr = $('#next-refresh');
   if (nr) {
     if (!['wars', 'room', 'hits'].includes(S.tab) || (!S.key && !S.demo)) nr.textContent = '—';
@@ -1886,6 +2043,20 @@ document.addEventListener('click', (e) => {
   else if (act === 'clear-squad-search') { S.ff.squadSearch = ''; renderView(); }
   else if (act === 'open-member') { S.ff.popup = +el.dataset.pid; renderView(); }
   else if (act === 'close-member') { if (el === e.target) { S.ff.popup = null; renderView(); } }
+  else if (act === 'copy-member-discord') {
+    const txt = memberDiscordText();
+    if (!txt) return;
+    copyText(txt).then((ok) => {
+      if (ok) {
+        S.ff.discCopiedAt = Date.now();
+        renderView();
+        setTimeout(() => { if (S.ff.popup) renderView(); }, 2300);
+      } else {
+        S.err = 'Clipboard blocked by the browser — select the text manually instead.';
+        renderErr();
+      }
+    });
+  }
   else if (act === 'goto-my-war') {
     const mw = myWar();
     if (mw) { S.room.warId = mw.id; S.room.rosterA = S.room.rosterB = null; S.room.rosterErr = {}; refreshData(); }
