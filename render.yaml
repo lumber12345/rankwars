@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: torn-rank-wars
+    runtime: node
+    plan: free
+    buildCommand: echo "zero dependencies - nothing to build"
+    startCommand: node server.js
+    healthCheckPath: /api/ping
+    envVars:
+      - key: NODE_VERSION
+        value: "20"

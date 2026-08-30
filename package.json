@@ -1,0 +1,15 @@
+{
+  "name": "torn-rank-wars",
+  "version": "1.2.0",
+  "description": "Live tracker for Torn ranked wars — war lists, war room, FF Scouter stat-range target matcher, hit lists, war reports.",
+  "private": true,
+  "main": "server.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {},
+  "license": "MIT"
+}
