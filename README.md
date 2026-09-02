@@ -9,6 +9,7 @@ A live tracker for [Torn](https://www.torn.com)'s **Ranked Wars** — unofficial
 - **Live Wars** — every ongoing & scheduled ranked war on Torn: both faction scores, chains, target %, dominance bar, war countdowns. Auto-refreshes (10–60 s, configurable).
 - **War Room** — pick any war for a big scoreboard (scores, target, lead, end-of-war countdown), a score-progression chart, and **both rosters** with live statuses: hospital/jail timers, traveling, last action, wall defenders, revivers. Filter to *attackable* players (okay or leaving hospital <10 min).
 - **War report tab** — pick a faction (defaults to yours): per-member **kills** (attacks), **respect** (war score) and **share %** with bars and totals, plus faction **assets** — respect, points and item rewards — for any finished ranked war. Ongoing wars show live faction scores and unlock the member report automatically once Torn generates it.
+- **Matrix rain background** — subtle falling-code canvas behind the app (theme green, ~22 fps, pauses on hidden tabs, static frame under `prefers-reduced-motion`, gracefully skips itself where canvas is unavailable).
 - **Squad kills column** — the YOUR SQUAD table shows each member's **war kills** (won attacks vs war opponents), tallied live from the faction attacks feed (`is_ranked_war` filter, incremental + cached across reloads; needs a Limited key — Public keys see a clear hint instead).
 - **Chain meter** — the Hit Club's ADD TARGETS box shows live ranked-war chains for **both** factions (`/faction/{id}/chain`): current/max hits, respect modifier, a countdown bar for the chain timer, and milestone-cooldown status. The meter **flashes red when the chain timer drops to ≤ 1 minute** so you know to keep hitting.
 - **Squad matchups + FF Scouter member cards** — the Hit Club also lists **your own faction's members** with their FF Scouter estimates, and shows how many enemy members fall in each member's stat range. Clicking a member opens an **FF Scouter card popup**: their estimate, stat detail/source, status, and a ready-to-work list of **opponents in stat range for that specific member** (est, level, live hospital timer, ⚔ attack link, + list).
@@ -31,14 +32,23 @@ Zero dependencies — any Node 18+ works. Then:
 1. Get an API key: Torn → **Preferences → API keys** → create a **Public** key (it's enough for every feature).
 2. Paste it into the key field and hit **Save** (stored only in your browser's localStorage).
 
-## Deploy (Render.com, free)
+## Free hosting (deploy-ready)
 
-The ZIP / repo is deploy-ready (zero dependencies, honors `PORT` + `0.0.0.0`):
+Zero dependencies, honors `PORT` + `0.0.0.0`, includes `render.yaml`, `Procfile`, `package.json`, `Dockerfile`. The app is stateless (all state lives in users' browsers), so free-tier sleeping only costs a slow first request.
 
-1. Push this folder to a GitHub repo (or use the ZIP contents).
-2. On [render.com](https://render.com): **New → Web Service → connect the repo**.
-3. Render auto-detects `render.yaml` / `package.json` — runtime **Node**, build *(none needed)*, start `node server.js`, health check `/api/ping`.
-4. Deploy. Works on the free plan (the service sleeps when idle; first request wakes it).
+| Platform | Free tier (2026) | Card? | Sleeps? | How |
+| --- | --- | --- | --- | --- |
+| **Render** ⭐ | 750 hrs/mo, 512 MB | No | After 15 min idle (30–60 s wake) | `render.yaml` auto-detected |
+| Northflank | 2 services, always-on | Yes (verify) | **No** | Node service, start `node server.js` |
+| Leapcell / Back4App / Koyeb | varies, no card | No | Usually | Use `Dockerfile` or Node buildpack |
+| Google Cloud Run | ~180K vCPU-s/mo | Yes | Scale-to-zero | `Dockerfile` |
+
+**Render (recommended, 3 steps):**
+1. Push this folder to a GitHub repo.
+2. [render.com](https://render.com) → **New → Web Service** → connect the repo → it auto-reads `render.yaml` (Node, no build, `node server.js`, health check `/api/ping`).
+3. Deploy → you get `https://<name>.onrender.com`.
+
+Tip: free tiers sleep when idle — open the app once after deploying, or ping `/api/ping` with an uptime monitor (e.g. cron-job.org, free) every 10 min to keep it warm.
 
 ## Architecture
 

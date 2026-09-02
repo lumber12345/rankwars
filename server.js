@@ -36,7 +36,7 @@ function cacheSet(k, status, body) {
 
 /* ------------------------------------------------------------ validation */
 const PATH_OK = [
-  /^\/faction\/(basic|members|wars|warfareranked|rankedwars|rankedwarreport)$/,
+  /^\/faction\/(basic|members|wars|warfareranked|rankedwars|rankedwarreport|attacks)$/,
   /^\/faction\/\d+\/(basic|members|wars|rankedwars|rankedwarreport|chain|attacks)$/,
   /^\/user\/(basic|profile)$/,
 ];

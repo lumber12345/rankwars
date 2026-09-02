@@ -1089,7 +1089,8 @@ async function loadWarKills(war, facId, enemyIds) {
   try {
     let from = st.lastTs ? st.lastTs + 1 : (+war.start || 0);
     for (let page = 0; page < WK_PAGES_PER_CYCLE; page++) {
-      const d = await torn(`/faction/${facId}/attacks`, { filters: 'outgoing', from, sort: 'ASC', limit: 100 });
+      // v2 only exposes the key owner's faction attacks feed — which is exactly whose kills we tally
+      const d = await torn('/faction/attacks', { filters: 'outgoing', from, sort: 'ASC', limit: 100 });
       const arr = (d && d.attacks) || [];
       arr.forEach((a) => {
         if (a && a.is_ranked_war && a.defender && enemyIds.has(+a.defender.id) && WK_WIN_RESULTS.includes(a.result)) {
@@ -2425,4 +2426,51 @@ document.addEventListener('keydown', (e) => {
   if (S.demo) seedDemoHits();
   S.nextAt = 0;
   refreshData();
+})();
+
+/* ----- matrix rain background (canvas, self-contained) ----- */
+(function matrixRain() {
+  const cv = document.getElementById('matrixcv');
+  if (!cv || !cv.getContext) return;
+  const ctx = cv.getContext('2d');
+  if (!ctx) return; // no canvas support (tests / exotic embeds) — app runs unchanged
+  const GLYPHS = 'アカサタナハマヤラワイキシチニヒミリウクスツヌフムユルエケセテネヘメレオコソトノホモヨロヴ0123456789ABCDEFXYZ$#@*+=<>';
+  const FS = 16;                       // column width / font size (CSS px)
+  const FRAME_MS = 45;                 // ~22 fps — readable but cheap
+  let cols = 0, drops = [], w = 0, h = 0, raf = 0, last = 0, hidden = false;
+  const reduce = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  function resize() {
+    w = window.innerWidth; h = window.innerHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+    cv.width = Math.floor(w * dpr); cv.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = '#0b0e11';
+    ctx.fillRect(0, 0, w, h);
+    cols = Math.ceil(w / FS);
+    drops = Array.from({ length: cols }, () => Math.floor(Math.random() * (h / FS)));
+    ctx.font = (FS - 2) + 'px ui-monospace, Menlo, Consolas, monospace';
+    ctx.textBaseline = 'top';
+  }
+  function frame(anim) {
+    ctx.fillStyle = 'rgba(11, 14, 17, 0.10)';   // fade in the app's own bg color
+    ctx.fillRect(0, 0, w, h);
+    for (let i = 0; i < cols; i++) {
+      const y = drops[i] * FS;
+      ctx.fillStyle = Math.random() < 0.06 ? '#b9ffb0' : '#63c74d';  // rare bright head, theme-green body
+      ctx.fillText(GLYPHS[(Math.random() * GLYPHS.length) | 0], i * FS, y);
+      if (y > h && Math.random() > 0.975) drops[i] = 0;
+      else drops[i]++;
+    }
+  }
+  function loop(ts) {
+    raf = requestAnimationFrame(loop);
+    if (hidden || ts - last < FRAME_MS) return;
+    last = ts;
+    frame(true);
+  }
+  window.addEventListener('resize', resize);
+  document.addEventListener('visibilitychange', () => { hidden = document.hidden; });
+  resize();
+  if (reduce) { for (let i = 0; i < Math.ceil(h / FS) + 10; i++) frame(false); return; } // one static frame
+  raf = requestAnimationFrame(loop);
 })();
